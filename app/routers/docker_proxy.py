@@ -191,7 +191,8 @@ async def proxy_v2(path: str, request: Request):
             new_realm = f"{my_host}/token"
             resp_headers["www-authenticate"] = auth_header.replace(upstream_realm, new_realm)
     
-    resp_headers.pop("content-length", None)
+    if request.method != "HEAD":
+        resp_headers.pop("content-length", None)
     resp_headers.pop("content-encoding", None)
 
     async def iter_response():
