@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.database import create_db_and_tables
+from app.database import create_db_and_tables, upgrade_db
 from app.services import proxy_manager
 from app.routers import web_ui, docker_proxy
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -17,6 +17,7 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Initializing Database...")
     create_db_and_tables()
+    upgrade_db() # Run migrations
     
     logger.info("Seeding Proxies...")
     proxy_manager.init_proxies()
