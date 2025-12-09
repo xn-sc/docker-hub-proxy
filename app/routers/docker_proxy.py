@@ -123,9 +123,11 @@ async def proxy_v2(path: str, request: Request):
         upstream_url += f"?{request.url.query}"
     
     # Headers
-    headers = dict(request.headers)
-    headers.pop("host", None)
-    headers.pop("content-length", None)
+    # Use items() to preserve multi-value headers (e.g., Accept)
+    headers_list = []
+    for key, value in request.headers.items():
+        if key.lower() not in ["host", "content-length"]:
+            headers_list.append((key, value))
     
     # Body
     content = await request.body()
@@ -148,7 +150,7 @@ async def proxy_v2(path: str, request: Request):
     r = None
     try:
         # First attempt (Transparency / or client's own Auth)
-        r = await send_request(upstream_url, headers, content)
+        r = await send_request(upstream_url, headers_list, content)
         
         # Check for 401 and if we can attempt auto-auth (either with stored creds OR anonymous)
         if r.status_code == 401:
@@ -170,25 +172,26 @@ async def proxy_v2(path: str, request: Request):
                     
                     if token:
                         logger.info("Got upstream token, retrying request...")
-                        retry_headers = headers.copy()
-                        retry_headers["Authorization"] = f"Bearer {token}"
+                        # Copy headers list
+                        retry_headers = list(headers_list)
+                        retry_headers.append(("Authorization", f"Bearer {token}"))
                         r = await send_request(upstream_url, retry_headers, content)
                     else:
                         logger.warning("Failed to obtain upstream token, returning original 401.")
                         # Re-open the original request or let it fall through? 
                         # We need to re-request to get the 401 body/headers back if we closed it.
-                        r = await send_request(upstream_url, headers, content)
+                        r = await send_request(upstream_url, headers_list, content)
             
             elif auth_header and "Basic" in auth_header and proxy_node.username and proxy_node.password:
                 # Close previous stream
                 await r.aclose()
                 logger.info(f"Upstream 401 (Basic), attempting auto-auth for {proxy_node.name}")
                 
-                retry_headers = headers.copy()
+                retry_headers = list(headers_list)
                 # Manual Basic Auth Header Construction
                 auth_str = f"{proxy_node.username}:{proxy_node.password}"
                 b64_auth = base64.b64encode(auth_str.encode()).decode()
-                retry_headers["Authorization"] = f"Basic {b64_auth}"
+                retry_headers.append(("Authorization", f"Basic {b64_auth}"))
                 
                 logger.info("Retrying request with Basic Auth...")
                 r = await send_request(upstream_url, retry_headers, content)
