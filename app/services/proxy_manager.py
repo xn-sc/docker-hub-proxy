@@ -5,6 +5,7 @@ from sqlmodel import Session, select
 from app.database import engine
 from app.models import ProxyNode
 from datetime import datetime
+from typing import Optional
 
 logger = logging.getLogger("proxy_manager")
 
@@ -63,8 +64,8 @@ async def run_speed_test():
         session.commit()
     logger.info("Speed test completed.")
 
-def get_best_proxy() -> str:
-    """Get the URL of the best performing proxy."""
+def get_best_proxy() -> Optional[ProxyNode]:
+    """Get the best performing proxy node."""
     with Session(engine) as session:
         # Get enabled proxies sorted by latency
         # Filter out latency >= 9999
@@ -72,10 +73,12 @@ def get_best_proxy() -> str:
         result = session.exec(statement).first()
         
         if result:
-            return result.url
+            return result
         
-        # Fallback to official if everything fails
-        return "https://registry-1.docker.io"
+        # Fallback object if no db nodes work (simulated)
+        # However, to maintain consistency, let's return a temporary ProxyNode object 
+        # for the official hub if nothing is found in DB or everything is down.
+        return ProxyNode(name="Fallback Official", url="https://registry-1.docker.io")
 
 def get_all_proxies():
     with Session(engine) as session:

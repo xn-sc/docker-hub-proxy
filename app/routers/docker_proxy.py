@@ -46,9 +46,46 @@ async def proxy_token(request: Request):
         logger.error(f"Token proxy error: {e}")
         return Response(content="Auth Error", status_code=500)
 
+import re
+
+# ... existing imports ...
+
+async def parse_www_authenticate(header: str):
+    """Parse Www-Authenticate header to extract realm, service, and scope."""
+    # Example: Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:library/ubuntu:pull"
+    info = {}
+    for key in ["realm", "service", "scope"]:
+        match = re.search(f'{key}="([^"]+)"', header)
+        if match:
+            info[key] = match.group(1)
+    return info
+
+async def get_upstream_token(realm: str, service: str, scope: str, username: str, password: str) -> str:
+    """Fetch Bearer token from upstream realm."""
+    params = {}
+    if service:
+        params["service"] = service
+    if scope:
+        params["scope"] = scope
+    
+    try:
+        # Docker auth usually uses Basic Auth to get the token
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(realm, params=params, auth=(username, password))
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("token") or data.get("access_token")
+            else:
+                logger.error(f"Failed to get token from {realm}: {resp.status_code} - {resp.text}")
+                return None
+    except Exception as e:
+        logger.error(f"Token fetch error: {e}")
+        return None
+
 async def proxy_v2(path: str, request: Request):
-    # 1. Get Best Proxy
-    upstream_base = proxy_manager.get_best_proxy()
+    # 1. Get Best Proxy Node
+    proxy_node = proxy_manager.get_best_proxy()
+    upstream_base = proxy_node.url
     
     # Ensure no trailing slash on base, lead slash on path handled by f-string logic
     upstream_url = f"{upstream_base.rstrip('/')}/v2/{path}"
@@ -62,21 +99,72 @@ async def proxy_v2(path: str, request: Request):
     headers.pop("host", None)
     headers.pop("content-length", None)
     
+    # Remove local Authorization if we are going to manage it, 
+    # BUT for now, let's keep it. If upstream rejects it, we'll try our stored creds.
+    # Actually, if we want to force our stored creds, we might want to strip it?
+    # Let's strip it ONLY if we have stored creds and the first request fails? 
+    # Or just let it fail first.
+    
     # Body
     content = await request.body()
-    
-    # Log upload
     traffic_logger.log_traffic(bytes_uploaded=len(content))
 
-    client = httpx.AsyncClient(follow_redirects=True, timeout=None) # No timeout for large downloads
-    try:
+    client = httpx.AsyncClient(follow_redirects=True, timeout=None)
+    
+    async def send_request(url, head, body, auth=None):
         req = client.build_request(
             request.method,
-            upstream_url,
-            headers=headers,
-            content=content
+            url,
+            headers=head,
+            content=body
         )
-        r = await client.send(req, stream=True)
+        if auth: # Manually add auth header if provided string
+             req.headers["Authorization"] = auth
+             
+        return await client.send(req, stream=True)
+
+    try:
+        # First attempt (Transparency)
+        r = await send_request(upstream_url, headers, content)
+        
+        # Check for 401 and if we have credentials to fix it
+        if r.status_code == 401 and proxy_node.username and proxy_node.password:
+            auth_header = r.headers.get("www-authenticate")
+            if auth_header and "Bearer" in auth_header:
+                # Close previous stream
+                await r.aclose()
+                
+                logger.info(f"Upstream 401, attempting auth for {proxy_node.name}")
+                auth_info = await parse_www_authenticate(auth_header)
+                if auth_info.get("realm"):
+                    token = await get_upstream_token(
+                        auth_info["realm"], 
+                        auth_info.get("service"), 
+                        auth_info.get("scope"),
+                        proxy_node.username,
+                        proxy_node.password
+                    )
+                    
+                    if token:
+                        logger.info("Got upstream token, retrying request...")
+                        # Retry with new token
+                        # We must remove any existing Authorization header from original request
+                        retry_headers = headers.copy()
+                        retry_headers["Authorization"] = f"Bearer {token}"
+                        r = await send_request(upstream_url, retry_headers, content)
+                    else:
+                        logger.warning("Failed to obtain upstream token.")
+            
+            elif r.status_code == 401 and "Basic" in auth_header:
+                 # Basic Auth retry (Less common for Registry V2 but possible)
+                 await r.aclose()
+                 import base64
+                 creds = f"{proxy_node.username}:{proxy_node.password}"
+                 b64_creds = base64.b64encode(creds.encode()).decode()
+                 retry_headers = headers.copy()
+                 retry_headers["Authorization"] = f"Basic {b64_creds}"
+                 r = await send_request(upstream_url, retry_headers, content)
+
     except Exception as e:
         await client.aclose()
         logger.error(f"Connection error: {e}")
@@ -86,23 +174,23 @@ async def proxy_v2(path: str, request: Request):
     resp_headers = dict(r.headers)
     
     # Www-Authenticate Rewrite
+    # If we successfully authenticated upstream, we might NOT want to send Www-Authenticate back to client?
+    # If we return 200, client is happy.
+    # If we return 401 (auth failed even with our creds), we should probably let client see it?
+    # But we need to rewrite the Realm to point to us if we want client to be able to login against us?
+    # Current logic: If we are here, r.status_code is the final result.
+    
     auth_header = resp_headers.get("www-authenticate")
     if auth_header:
-        # Simple replace of realm
-        # We want realm="https://<my-host>/token"
         my_host = f"{request.url.scheme}://{request.url.netloc}"
-        
         import re
         realm_pattern = re.compile(r'realm="([^"]+)"')
         match = realm_pattern.search(auth_header)
         if match:
             upstream_realm = match.group(1)
-            # Replace with our token endpoint
             new_realm = f"{my_host}/token"
-            new_header = auth_header.replace(upstream_realm, new_realm)
-            resp_headers["www-authenticate"] = new_header
+            resp_headers["www-authenticate"] = auth_header.replace(upstream_realm, new_realm)
     
-    # Exclude some headers
     resp_headers.pop("content-length", None)
     resp_headers.pop("content-encoding", None)
 
