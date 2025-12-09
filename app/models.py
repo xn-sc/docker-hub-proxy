@@ -19,3 +19,10 @@ class TrafficStats(SQLModel, table=True):
     download_bytes: int = Field(default=0)
     upload_bytes: int = Field(default=0)
     request_count: int = Field(default=0)
+
+class PullHistory(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    request_time: datetime = Field(default_factory=datetime.utcnow)
+    image: str
+    tag: str
+    client_ip: str

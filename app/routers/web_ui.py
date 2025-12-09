@@ -17,15 +17,24 @@ async def index(request: Request):
     
     # Calculate totals
     total_download = sum(s.download_bytes for s in stats)
-    total_reqs = sum(s.request_count for s in stats)
+    # total_reqs = sum(s.request_count for s in stats) # Replaced by Pulls
+    
+    pull_count = traffic_logger.get_total_pull_count()
+    pull_history = traffic_logger.get_pull_history(limit=300) # Get last 50 pulls
     
     return templates.TemplateResponse("index.html", {
         "request": request,
         "proxies": [p.model_dump(mode='json') for p in proxies],
         "stats": [s.model_dump(mode='json') for s in stats],
         "total_download": total_download,
-        "total_reqs": total_reqs
+        "pull_count": pull_count,
+        "pull_history": [p.model_dump(mode='json') for p in pull_history]
     })
+
+@router.get("/api/pulls")
+async def get_pulls():
+    pulls = traffic_logger.get_pull_history(limit=500)
+    return [p.model_dump(mode='json') for p in pulls]
 
 @router.get("/api/search")
 async def search_images(q: str):

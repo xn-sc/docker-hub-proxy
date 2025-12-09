@@ -1,7 +1,7 @@
 from datetime import date
-from sqlmodel import Session, select
+from sqlmodel import Session, select, func
 from app.database import engine
-from app.models import TrafficStats
+from app.models import TrafficStats, PullHistory
 
 def log_traffic(bytes_downloaded: int = 0, bytes_uploaded: int = 0):
     today_str = date.today().isoformat()
@@ -18,6 +18,20 @@ def log_traffic(bytes_downloaded: int = 0, bytes_uploaded: int = 0):
         
         session.add(stats)
         session.commit()
+
+def log_pull(image: str, tag: str, client_ip: str):
+    with Session(engine) as session:
+        pull = PullHistory(image=image, tag=tag, client_ip=client_ip)
+        session.add(pull)
+        session.commit()
+
+def get_pull_history(limit: int = 100):
+    with Session(engine) as session:
+        return session.exec(select(PullHistory).order_by(PullHistory.request_time.desc()).limit(limit)).all()
+
+def get_total_pull_count():
+    with Session(engine) as session:
+        return session.exec(select(func.count(PullHistory.id))).one()
 
 def get_traffic_stats():
     with Session(engine) as session:
