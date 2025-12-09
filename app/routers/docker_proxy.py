@@ -30,9 +30,18 @@ async def proxy_token(request: Request):
     
     if upstream_realm_b64:
         try:
-            url = base64.b64decode(upstream_realm_b64).decode('utf-8')
-        except Exception:
-            logger.warning("Failed to decode _upstream_realm, falling back to default.")
+            # Reverse the encoding: unquote -> urlsafe_b64decode -> decode utf-8
+            decoded_b64 = unquote(upstream_realm_b64)
+            # Fix padding if missing (urlsafe_b64decode is strict about padding in some versions?)
+            # Usually strict padding is required.
+            missing_padding = len(decoded_b64) % 4
+            if missing_padding:
+                decoded_b64 += '=' * (4 - missing_padding)
+            
+            url = base64.urlsafe_b64decode(decoded_b64).decode('utf-8')
+            logger.info(f"Resolved upstream token URL: {url}")
+        except Exception as e:
+            logger.warning(f"Failed to decode _upstream_realm: {e}, falling back to default.")
             
     # Forward all other query params to the upstream auth server
     # We must exclude _upstream_realm from the forwarded params
@@ -174,12 +183,9 @@ async def proxy_v2(path: str, request: Request):
     resp_headers = dict(r.headers)
     
     # Www-Authenticate Rewrite logic
-    # This logic runs if:
-    # 1. We didn't have creds (anonymous proxy)
-    # 2. We had creds but they failed (upstream 401 still)
-    # 3. Client is explicitly logging in (docker login)
     auth_header = resp_headers.get("www-authenticate")
     if auth_header:
+        logger.info(f"Original Www-Authenticate: {auth_header}")
         my_host = f"{request.url.scheme}://{request.url.netloc}"
         import re
         realm_pattern = re.compile(r'realm="([^"]+)"')
@@ -187,16 +193,16 @@ async def proxy_v2(path: str, request: Request):
         if match:
             upstream_realm = match.group(1)
             # Encode upstream realm to pass to our token endpoint
-            b64_realm = base64.b64encode(upstream_realm.encode()).decode()
+            # Use urlsafe_b64encode to avoid +/ and quote to handle padding =
+            b64_realm = base64.urlsafe_b64encode(upstream_realm.encode()).decode()
             
             # Construct new realm URL: https://my-proxy/token?_upstream_realm=...
-            new_realm = f"{my_host}/token?_upstream_realm={b64_realm}"
+            # We also quote just in case, though urlsafe usually only has -_ and =
+            new_realm = f"{my_host}/token?_upstream_realm={quote(b64_realm)}"
             
             # Replace in header
-            # Note: We must be careful not to break the header structure.
-            # Usually: Bearer realm="...",service="...",scope="..."
-            # Simple string replace is risky if realm appears elsewhere, but usually safe for URL.
             resp_headers["www-authenticate"] = auth_header.replace(upstream_realm, new_realm)
+            logger.info(f"Rewritten Www-Authenticate: {resp_headers['www-authenticate']}")
     
     # Exclude headers
     if request.method != "HEAD":
