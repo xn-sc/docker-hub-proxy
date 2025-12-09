@@ -50,10 +50,14 @@ async def proxy_token(request: Request):
             # Log upload traffic (minimal for token)
             traffic_logger.log_traffic(bytes_uploaded=len(str(request.query_params)))
 
+            resp_headers = dict(resp.headers)
+            resp_headers.pop("content-length", None)
+            resp_headers.pop("content-encoding", None)
+
             return Response(
                 content=resp.content,
                 status_code=resp.status_code,
-                headers=dict(resp.headers)
+                headers=resp_headers
             )
     except Exception as e:
         logger.error(f"Token proxy error for {url}: {e}")
